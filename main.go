@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -249,18 +251,33 @@ func createGetDatasetsTools() mcp.Tool {
 	type GetDatasetsParams struct {
 		// The catalog identifier to retrieve datasets from
 		Catalog string `json:"catalog"`
+		// The page number (1-based) for pagination
+		Page int `json:"page,omitempty"`
+		// The number of datasets per page
+		PageSize int `json:"page_size,omitempty"`
 	}
 
 	return mcp.CreateTool(mcp.ToolDef[GetDatasetsParams]{
 		Name:        "get_datasets",
-		Description: "Retrieve all datasets from a specific CBS catalog",
+		Description: "Retrieve datasets from a specific CBS catalog with pagination support",
 		HandleFunc: func(ctx context.Context, params GetDatasetsParams) *mcp.CallToolResult {
 			if params.Catalog == "" {
 				return newToolCallErrorResult("Catalog identifier is required")
 			}
 
+			// Set default pagination values if not provided
+			page := params.Page
+			if page <= 0 {
+				page = 1
+			}
+
+			pageSize := params.PageSize
+			if pageSize <= 0 {
+				pageSize = 20 // Default page size
+			}
+
 			client := NewClient()
-			datasets, err := client.GetDatasets(params.Catalog)
+			datasets, totalCount, err := client.GetDatasets(params.Catalog, page, pageSize)
 			if err != nil {
 				return newToolCallErrorResult("Failed to retrieve datasets: %v", err)
 			}
@@ -270,11 +287,35 @@ func createGetDatasetsTools() mcp.Tool {
 				return newToolCallErrorResult("Failed to format datasets: %v", err)
 			}
 
+			// Calculate pagination information
+			totalPages := (totalCount + pageSize - 1) / pageSize
+			hasNextPage := page < totalPages
+			hasPrevPage := page > 1
+
+			paginationInfo := fmt.Sprintf(
+				"Page %d of %d (showing %d of %d total datasets)",
+				page, totalPages, len(datasets), totalCount,
+			)
+
+			// Add navigation hints
+			var navHints []string
+			if hasPrevPage {
+				navHints = append(navHints, fmt.Sprintf("For previous page, use page=%d", page-1))
+			}
+			if hasNextPage {
+				navHints = append(navHints, fmt.Sprintf("For next page, use page=%d", page+1))
+			}
+
+			navInfo := ""
+			if len(navHints) > 0 {
+				navInfo = "\n\n" + strings.Join(navHints, "\n")
+			}
+
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{
 					mcp.TextContent{
-						Text: fmt.Sprintf("Found %d datasets in catalog '%s':\n\n```json\n%s\n```",
-							len(datasets), params.Catalog, string(datasetsJSON)),
+						Text: fmt.Sprintf("%s\n\nFound datasets in catalog '%s':\n\n```json\n%s\n```%s",
+							paginationInfo, params.Catalog, string(datasetsJSON), navInfo),
 					},
 				},
 			}
@@ -435,32 +476,56 @@ func (c *Client) GetCatalogs() ([]Catalog, error) {
 }
 
 // GetDatasets retrieves all datasets in a catalog
-func (c *Client) GetDatasets(catalog string) ([]Dataset, error) {
-	url := fmt.Sprintf("%s/%s/Datasets", c.baseURL, catalog)
+func (c *Client) GetDatasets(catalog string, page, pageSize int) ([]Dataset, int, error) {
+	baseURL := fmt.Sprintf("%s/%s/Datasets", c.baseURL, catalog)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	// Build URL with query parameters
+	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, 0, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Add pagination parameters
+	q := u.Query()
+	if pageSize > 0 {
+		q.Set("$top", fmt.Sprintf("%d", pageSize))
+		if page > 0 {
+			q.Set("$skip", fmt.Sprintf("%d", (page-1)*pageSize))
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get datasets: %w", err)
+		return nil, 0, fmt.Errorf("failed to get datasets: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
 	var datasetResp DatasetResponse
 	if err := json.NewDecoder(resp.Body).Decode(&datasetResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal datasets: %w", err)
+		return nil, 0, fmt.Errorf("failed to unmarshal datasets: %w", err)
 	}
 
-	return datasetResp.Value, nil
+	// Get total count from OData-Count header if available
+	totalCount := len(datasetResp.Value)
+	if countHeader := resp.Header.Get("OData-Count"); countHeader != "" {
+		if count, err := strconv.Atoi(countHeader); err == nil {
+			totalCount = count
+		}
+	}
+
+	return datasetResp.Value, totalCount, nil
 }
 
 // GetDimensions retrieves all dimensions for a dataset
