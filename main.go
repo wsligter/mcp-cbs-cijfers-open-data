@@ -253,7 +253,7 @@ func createGetDatasetsTools() mcp.Tool {
 		Catalog string `json:"catalog"`
 		// The page number (1-based) for pagination
 		Page int `json:"page,omitempty"`
-		// The number of datasets per page
+		// The number of datasets per page. A minimum of 20 is recommended.
 		PageSize int `json:"page_size,omitempty"`
 	}
 
