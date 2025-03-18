@@ -20,7 +20,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,13 +47,13 @@ const (
 	baseURL = "https://datasets.cbs.nl/odata/v1"
 )
 
-// Client represents a CBS API client
+// Client represents a CBS API client.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
 }
 
-// Catalog represents a CBS data catalog
+// Catalog represents a CBS data catalog.
 type Catalog struct {
 	Identifier   string `json:"identifier"`
 	Index        int    `json:"index"`
@@ -65,17 +67,17 @@ type Catalog struct {
 	ContactPoint string `json:"contactPoint,omitempty"`
 }
 
-// CatalogResponse represents the response from the Catalogs endpoint
+// CatalogResponse represents the response from the Catalogs endpoint.
 type CatalogResponse struct {
 	Value []Catalog `json:"value"`
 }
 
-// Dataset represents a CBS dataset
+// Dataset represents a CBS dataset.
 type Dataset struct {
 	ID                   string    `json:"id,omitempty"`
 	Identifier           string    `json:"identifier"`
 	Title                string    `json:"title"`
-	Description          string    `json:"description,omitempty"`
+	Description          string    `json:"-"`
 	Modified             time.Time `json:"modified"`
 	ReleaseDate          time.Time `json:"releaseDate"`
 	ModificationDate     time.Time `json:"modificationDate"`
@@ -88,12 +90,12 @@ type Dataset struct {
 	DatasetType          string    `json:"datasetType"`
 }
 
-// DatasetResponse represents the response from the Datasets endpoint
+// DatasetResponse represents the response from the Datasets endpoint.
 type DatasetResponse struct {
 	Value []Dataset `json:"value"`
 }
 
-// Dimension represents a dataset dimension
+// Dimension represents a dataset dimension.
 type Dimension struct {
 	Identifier     string `json:"identifier"`
 	Title          string `json:"title"`
@@ -103,15 +105,15 @@ type Dimension struct {
 	ContainsCodes  bool   `json:"containsCodes"`
 }
 
-// DimensionResponse represents the response from the Dimensions endpoint
+// DimensionResponse represents the response from the Dimensions endpoint.
 type DimensionResponse struct {
 	Value []Dimension `json:"value"`
 }
 
-// Observation represents a data observation
+// Observation represents a data observation.
 type Observation struct {
 	ID     int64             `json:"ID"`
-	Values map[string]string `json:"-"` // Dynamic fields based on dimensions
+	Values map[string]string `json:"-"` // Dynamic fields based on dimensions.
 }
 
 func main() {
@@ -164,9 +166,12 @@ func main() {
 	// Register CBS API tools
 	mcpServer.RegisterTools(
 		createGetCatalogsTools(),
-		createGetDatasetsTools(),
 		createGetDimensionsTools(),
 		createGetObservationsTools(),
+		createQueryDatasetsTools(),
+		createQueryObservationsTools(),
+		createGetMetadataTools(),
+		createGetDimensionValuesTools(),
 	)
 
 	httpServer := &http.Server{
@@ -214,11 +219,9 @@ func main() {
 	wg.Wait()
 }
 
-// createGetCatalogsTools creates a tool to retrieve CBS data catalogs
+// createGetCatalogsTools creates a tool to retrieve CBS data catalogs.
 func createGetCatalogsTools() mcp.Tool {
-	type GetCatalogsParams struct {
-		// No parameters needed for this tool
-	}
+	type GetCatalogsParams struct{}
 
 	return mcp.CreateTool(mcp.ToolDef[GetCatalogsParams]{
 		Name:        "get_catalogs",
@@ -246,84 +249,7 @@ func createGetCatalogsTools() mcp.Tool {
 	})
 }
 
-// createGetDatasetsTools creates a tool to retrieve datasets from a catalog
-func createGetDatasetsTools() mcp.Tool {
-	type GetDatasetsParams struct {
-		// The catalog identifier to retrieve datasets from
-		Catalog string `json:"catalog"`
-		// The page number (1-based) for pagination
-		Page int `json:"page,omitempty"`
-		// The number of datasets per page. A minimum of 20 is recommended.
-		PageSize int `json:"page_size,omitempty"`
-	}
-
-	return mcp.CreateTool(mcp.ToolDef[GetDatasetsParams]{
-		Name:        "get_datasets",
-		Description: "Retrieve datasets from a specific CBS catalog with pagination support",
-		HandleFunc: func(ctx context.Context, params GetDatasetsParams) *mcp.CallToolResult {
-			if params.Catalog == "" {
-				return newToolCallErrorResult("Catalog identifier is required")
-			}
-
-			// Set default pagination values if not provided
-			page := params.Page
-			if page <= 0 {
-				page = 1
-			}
-
-			pageSize := params.PageSize
-			if pageSize <= 0 {
-				pageSize = 20 // Default page size
-			}
-
-			client := NewClient()
-			datasets, totalCount, err := client.GetDatasets(params.Catalog, page, pageSize)
-			if err != nil {
-				return newToolCallErrorResult("Failed to retrieve datasets: %v", err)
-			}
-
-			datasetsJSON, err := json.Marshal(datasets)
-			if err != nil {
-				return newToolCallErrorResult("Failed to format datasets: %v", err)
-			}
-
-			// Calculate pagination information
-			totalPages := (totalCount + pageSize - 1) / pageSize
-			hasNextPage := page < totalPages
-			hasPrevPage := page > 1
-
-			paginationInfo := fmt.Sprintf(
-				"Page %d of %d (showing %d of %d total datasets)",
-				page, totalPages, len(datasets), totalCount,
-			)
-
-			// Add navigation hints
-			var navHints []string
-			if hasPrevPage {
-				navHints = append(navHints, fmt.Sprintf("For previous page, use page=%d", page-1))
-			}
-			if hasNextPage {
-				navHints = append(navHints, fmt.Sprintf("For next page, use page=%d", page+1))
-			}
-
-			navInfo := ""
-			if len(navHints) > 0 {
-				navInfo = "\n\n" + strings.Join(navHints, "\n")
-			}
-
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{
-					mcp.TextContent{
-						Text: fmt.Sprintf("%s\n\nFound datasets in catalog '%s':\n\n```json\n%s\n```%s",
-							paginationInfo, params.Catalog, string(datasetsJSON), navInfo),
-					},
-				},
-			}
-		},
-	})
-}
-
-// createGetDimensionsTools creates a tool to retrieve dimensions for a dataset
+// createGetDimensionsTools creates a tool to retrieve dimensions for a dataset.
 func createGetDimensionsTools() mcp.Tool {
 	type GetDimensionsParams struct {
 		// The catalog identifier
@@ -366,7 +292,7 @@ func createGetDimensionsTools() mcp.Tool {
 	})
 }
 
-// createGetObservationsTools creates a tool to retrieve observations from a dataset
+// createGetObservationsTools creates a tool to retrieve observations from a dataset.
 func createGetObservationsTools() mcp.Tool {
 	type GetObservationsParams struct {
 		// The catalog identifier
@@ -436,7 +362,7 @@ func newToolCallErrorResult(format string, args ...any) *mcp.CallToolResult {
 	}
 }
 
-// NewClient creates a new CBS API client
+// NewClient creates a new CBS API client.
 func NewClient() *Client {
 	return &Client{
 		httpClient: &http.Client{
@@ -446,7 +372,7 @@ func NewClient() *Client {
 	}
 }
 
-// GetCatalogs retrieves all available catalogs
+// GetCatalogs retrieves all available catalogs.
 func (c *Client) GetCatalogs() ([]Catalog, error) {
 	url := c.baseURL + "/Catalogs"
 
@@ -464,7 +390,8 @@ func (c *Client) GetCatalogs() ([]Catalog, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	var catalogResp CatalogResponse
@@ -475,60 +402,7 @@ func (c *Client) GetCatalogs() ([]Catalog, error) {
 	return catalogResp.Value, nil
 }
 
-// GetDatasets retrieves all datasets in a catalog
-func (c *Client) GetDatasets(catalog string, page, pageSize int) ([]Dataset, int, error) {
-	baseURL := fmt.Sprintf("%s/%s/Datasets", c.baseURL, catalog)
-
-	// Build URL with query parameters
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to parse URL: %w", err)
-	}
-
-	// Add pagination parameters
-	q := u.Query()
-	if pageSize > 0 {
-		q.Set("$top", fmt.Sprintf("%d", pageSize))
-		if page > 0 {
-			q.Set("$skip", fmt.Sprintf("%d", (page-1)*pageSize))
-		}
-	}
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get datasets: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	var datasetResp DatasetResponse
-	if err := json.NewDecoder(resp.Body).Decode(&datasetResp); err != nil {
-		return nil, 0, fmt.Errorf("failed to unmarshal datasets: %w", err)
-	}
-
-	// Get total count from OData-Count header if available
-	totalCount := len(datasetResp.Value)
-	if countHeader := resp.Header.Get("OData-Count"); countHeader != "" {
-		if count, err := strconv.Atoi(countHeader); err == nil {
-			totalCount = count
-		}
-	}
-
-	return datasetResp.Value, totalCount, nil
-}
-
-// GetDimensions retrieves all dimensions for a dataset
+// GetDimensions retrieves all dimensions for a dataset.
 func (c *Client) GetDimensions(catalog, identifier string) ([]Dimension, error) {
 	url := fmt.Sprintf("%s/%s/%s/Dimensions", c.baseURL, catalog, identifier)
 
@@ -546,7 +420,8 @@ func (c *Client) GetDimensions(catalog, identifier string) ([]Dimension, error) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	var dimensionResp DimensionResponse
@@ -557,17 +432,17 @@ func (c *Client) GetDimensions(catalog, identifier string) ([]Dimension, error) 
 	return dimensionResp.Value, nil
 }
 
-// GetObservations retrieves observations for a dataset with optional filters
-func (c *Client) GetObservations(catalog, identifier string, filters map[string]string) ([]map[string]interface{}, error) {
+// GetObservations retrieves observations for a dataset with optional filters.
+func (c *Client) GetObservations(catalog, identifier string, filters map[string]string) ([]map[string]any, error) {
 	baseURL := fmt.Sprintf("%s/%s/%s/Observations", c.baseURL, catalog, identifier)
 
-	// Build URL with query parameters
+	// Build URL with query parameters.
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse URL: %w", err)
 	}
 
-	// Add filters as query parameters
+	// Add filters as query parameters.
 	if len(filters) > 0 {
 		query := "$filter="
 		first := true
@@ -598,27 +473,628 @@ func (c *Client) GetObservations(catalog, identifier string, filters map[string]
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal observations: %w", err)
 	}
 
 	// Extract the observations from the response
-	observations, ok := result["value"].([]interface{})
+	observations, ok := result["value"].([]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected response format")
 	}
 
 	// Convert to a slice of maps
-	var observationMaps []map[string]interface{}
+	var observationMaps []map[string]any
 	for _, obs := range observations {
-		if obsMap, ok := obs.(map[string]interface{}); ok {
+		if obsMap, ok := obs.(map[string]any); ok {
 			observationMaps = append(observationMaps, obsMap)
 		}
 	}
 
 	return observationMaps, nil
+}
+
+// GetDatasetsWithQuery retrieves datasets with advanced OData query options.
+func (c *Client) GetDatasetsWithQuery(catalog string, queryOptions map[string]string) ([]Dataset, int, error) {
+	baseURL := fmt.Sprintf("%s/%s/Datasets", c.baseURL, catalog)
+
+	// Build URL with query parameters.
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Add OData query parameters.
+	q := u.Query()
+	for key, value := range queryOptions {
+		if strings.HasPrefix(key, "$") {
+			q.Set(key, value)
+		} else {
+			q.Set("$"+key, value)
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get datasets: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, 0, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var datasetResp DatasetResponse
+	if err := json.NewDecoder(resp.Body).Decode(&datasetResp); err != nil {
+		return nil, 0, fmt.Errorf("failed to unmarshal datasets: %w", err)
+	}
+
+	// Get total count from OData-Count header if available.
+	totalCount := len(datasetResp.Value)
+	if countHeader := resp.Header.Get("OData-Count"); countHeader != "" {
+		if count, err := strconv.Atoi(countHeader); err == nil {
+			totalCount = count
+		}
+	}
+
+	return datasetResp.Value, totalCount, nil
+}
+
+// GetObservationsWithQuery retrieves observations with advanced OData query options.
+func (c *Client) GetObservationsWithQuery(catalog, identifier string, queryOptions map[string]string) ([]map[string]any, error) {
+	baseURL := fmt.Sprintf("%s/%s/%s/Observations", c.baseURL, catalog, identifier)
+
+	// Build URL with query parameters.
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Add OData query parameters.
+	q := u.Query()
+	for key, value := range queryOptions {
+		if strings.HasPrefix(key, "$") {
+			q.Set(key, value)
+		} else {
+			q.Set("$"+key, value)
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get observations: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal observations: %w", err)
+	}
+
+	// Extract the observations from the response
+	observations, ok := result["value"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response format")
+	}
+
+	// Convert to a slice of maps
+	var observationMaps []map[string]any
+	for _, obs := range observations {
+		if obsMap, ok := obs.(map[string]any); ok {
+			observationMaps = append(observationMaps, obsMap)
+		}
+	}
+
+	return observationMaps, nil
+}
+
+// GetMetadata retrieves the metadata document for the OData service.
+func (c *Client) GetMetadata() (string, error) {
+	url := c.baseURL + "/$metadata"
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/xml")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	return string(data), nil
+}
+
+// GetDimensionValues retrieves all values for a specific dimension.
+func (c *Client) GetDimensionValues(catalog, dataset, dimension string, queryOptions map[string]string) ([]map[string]any, error) {
+	baseURL := fmt.Sprintf("%s/%s/%s/DimensionValues", c.baseURL, catalog, dataset)
+
+	// Build URL with query parameters.
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Add dimension filter
+	filterQuery := fmt.Sprintf("Dimension eq '%s'", dimension)
+
+	// Add OData query parameters
+	q := u.Query()
+	q.Set("$filter", filterQuery)
+	for key, value := range queryOptions {
+		if key != "filter" && key != "$filter" { // Skip filter as we already set it
+			if strings.HasPrefix(key, "$") {
+				q.Set(key, value)
+			} else {
+				q.Set("$"+key, value)
+			}
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get dimension values: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal dimension values: %w", err)
+	}
+
+	// Extract the values from the response.
+	values, ok := result["value"].([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected response format")
+	}
+
+	// Convert to a slice of maps.
+	var valuesMaps []map[string]any
+	for _, val := range values {
+		if valMap, ok := val.(map[string]any); ok {
+			valuesMaps = append(valuesMaps, valMap)
+		}
+	}
+
+	return valuesMaps, nil
+}
+
+// ExecuteQuery executes an arbitrary OData query against a specific endpoint.
+func (c *Client) ExecuteQuery(path string, queryOptions map[string]string) (map[string]any, error) {
+	baseURL := c.baseURL + path
+
+	// Build URL with query parameters
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse URL: %w", err)
+	}
+
+	// Add OData query parameters
+	q := u.Query()
+	for key, value := range queryOptions {
+		if strings.HasPrefix(key, "$") {
+			q.Set(key, value)
+		} else {
+			q.Set("$"+key, value)
+		}
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute query: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal query results: %w", err)
+	}
+
+	return result, nil
+}
+
+// createQueryDatasetsTools creates a tool to query datasets with advanced OData options.
+func createQueryDatasetsTools() mcp.Tool {
+	type QueryDatasetsParams struct {
+		// The catalog identifier. For now, just use "CBS"
+		Catalog string `json:"catalog"`
+		// OData $select parameter to choose specific fields
+		Select string `json:"select,omitempty"`
+		// OData $filter parameter for filtering results
+		Filter string `json:"filter,omitempty"`
+		// OData $orderby parameter for sorting results
+		OrderBy string `json:"orderby,omitempty"`
+		// OData $top parameter for limiting results
+		Top int `json:"top,omitempty"`
+		// OData $skip parameter for pagination
+		Skip int `json:"skip,omitempty"`
+		// OData $count parameter to include count in response
+		Count bool `json:"count,omitempty"`
+		// OData $search parameter for free-text search
+		Search string `json:"search,omitempty"`
+		// OData $expand parameter to include related entities
+		Expand string `json:"expand,omitempty"`
+	}
+
+	return mcp.CreateTool(mcp.ToolDef[QueryDatasetsParams]{
+		Name: "query_datasets",
+		Description: `
+Query datasets with advanced OData query options. Make sure to use pagination query params
+to avoid exceeding the token limits. For now, just use 'CBS' as the catalog identifier. Make sure
+to always include a "filter" parameter to exclude items where "Status" is "Gediscontinueerd".`,
+		HandleFunc: func(ctx context.Context, params QueryDatasetsParams) *mcp.CallToolResult {
+			if params.Catalog == "" {
+				return newToolCallErrorResult("Catalog identifier is required")
+			}
+
+			// Build query options map from parameters
+			queryOptions := make(map[string]string)
+
+			if params.Select != "" {
+				queryOptions["$select"] = params.Select
+			}
+
+			if params.Filter != "" {
+				queryOptions["$filter"] = params.Filter
+			}
+
+			if params.OrderBy != "" {
+				queryOptions["$orderby"] = params.OrderBy
+			}
+
+			if params.Top > 0 {
+				queryOptions["$top"] = strconv.Itoa(params.Top)
+			}
+
+			if params.Skip > 0 {
+				queryOptions["$skip"] = strconv.Itoa(params.Skip)
+			}
+
+			if params.Count {
+				queryOptions["$count"] = "true"
+			}
+
+			if params.Search != "" {
+				queryOptions["$search"] = params.Search
+			}
+
+			if params.Expand != "" {
+				queryOptions["$expand"] = params.Expand
+			}
+
+			client := NewClient()
+			datasets, totalCount, err := client.GetDatasetsWithQuery(params.Catalog, queryOptions)
+			if err != nil {
+				return newToolCallErrorResult("Failed to query datasets: %v", err)
+			}
+
+			// Format datasets as a concise list instead of raw JSON
+			var datasetList strings.Builder
+			for i, dataset := range datasets {
+				datasetList.WriteString(fmt.Sprintf("%d. %s (ID: %s)\n", i+1, dataset.Title, dataset.Identifier))
+				datasetList.WriteString(fmt.Sprintf("- Modified: %s\n", dataset.Modified.Format("2006-01-02")))
+				datasetList.WriteString(fmt.Sprintf("- Status: %s\n", dataset.Status))
+				datasetList.WriteString(fmt.Sprintf("- Type: %s\n", dataset.DatasetType))
+				datasetList.WriteString(fmt.Sprintf("- Observations: %d\n", dataset.ObservationCount))
+				datasetList.WriteString("\n")
+			}
+
+			// Calculate pagination information if relevant
+			paginationInfo := ""
+			if params.Top > 0 {
+				paginationInfo = fmt.Sprintf("Retrieved %d datasets (total count: %d)", len(datasets), totalCount)
+
+				// Add navigation hints if paging
+				if params.Skip > 0 || len(datasets) == params.Top {
+					paginationInfo += "\n\n"
+
+					if params.Skip > 0 {
+						paginationInfo += fmt.Sprintf("Previous page: skip=%d, top=%d\n",
+							int(math.Max(0, float64(params.Skip-params.Top))), params.Top)
+					}
+
+					if len(datasets) == params.Top {
+						paginationInfo += fmt.Sprintf("Next page: skip=%d, top=%d",
+							params.Skip+params.Top, params.Top)
+					}
+				}
+			}
+
+			// Provide query info
+			queryInfo := "Applied query options:\n"
+			for k, v := range queryOptions {
+				queryInfo += fmt.Sprintf("- %s: %s\n", k, v)
+			}
+
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					mcp.TextContent{
+						Text: fmt.Sprintf("%s\n\n%s\n\nDatasets from catalog '%s':\n\n%s",
+							paginationInfo, queryInfo, params.Catalog, datasetList.String()),
+					},
+				},
+			}
+		},
+	})
+}
+
+// createQueryObservationsTools creates a tool to query observations with advanced OData options.
+func createQueryObservationsTools() mcp.Tool {
+	type QueryObservationsParams struct {
+		// The catalog identifier
+		Catalog string `json:"catalog"`
+		// The dataset identifier
+		Dataset string `json:"dataset"`
+		// OData $select parameter to choose specific fields
+		Select string `json:"select,omitempty"`
+		// OData $filter parameter for filtering results
+		Filter string `json:"filter,omitempty"`
+		// OData $orderby parameter for sorting results
+		OrderBy string `json:"orderby,omitempty"`
+		// OData $top parameter for limiting results
+		Top int `json:"top,omitempty"`
+		// OData $skip parameter for pagination
+		Skip int `json:"skip,omitempty"`
+		// OData $count parameter to include count in response
+		Count bool `json:"count,omitempty"`
+		// OData $search parameter for free-text search
+		Search string `json:"search,omitempty"`
+		// OData $expand parameter to include related entities
+		Expand string `json:"expand,omitempty"`
+	}
+
+	return mcp.CreateTool(mcp.ToolDef[QueryObservationsParams]{
+		Name:        "query_observations",
+		Description: "Query observations with advanced OData query options to filter, sort, and shape results",
+		HandleFunc: func(ctx context.Context, params QueryObservationsParams) *mcp.CallToolResult {
+			if params.Catalog == "" {
+				return newToolCallErrorResult("Catalog identifier is required")
+			}
+			if params.Dataset == "" {
+				return newToolCallErrorResult("Dataset identifier is required")
+			}
+
+			// Build query options map from parameters
+			queryOptions := make(map[string]string)
+
+			if params.Select != "" {
+				queryOptions["$select"] = params.Select
+			}
+
+			if params.Filter != "" {
+				queryOptions["$filter"] = params.Filter
+			}
+
+			if params.OrderBy != "" {
+				queryOptions["$orderby"] = params.OrderBy
+			}
+
+			if params.Top > 0 {
+				queryOptions["$top"] = strconv.Itoa(params.Top)
+			}
+
+			if params.Skip > 0 {
+				queryOptions["$skip"] = strconv.Itoa(params.Skip)
+			}
+
+			if params.Count {
+				queryOptions["$count"] = "true"
+			}
+
+			if params.Search != "" {
+				queryOptions["$search"] = params.Search
+			}
+
+			if params.Expand != "" {
+				queryOptions["$expand"] = params.Expand
+			}
+
+			client := NewClient()
+			observations, err := client.GetObservationsWithQuery(params.Catalog, params.Dataset, queryOptions)
+			if err != nil {
+				return newToolCallErrorResult("Failed to query observations: %v", err)
+			}
+
+			// Limit the output size for very large result sets
+			limit := len(observations)
+			if params.Top > 0 && params.Top < limit {
+				limit = params.Top
+			} else if limit > 100 {
+				limit = 100 // Default limit to prevent huge responses
+			}
+
+			limitedObservations := observations
+			if limit < len(observations) {
+				limitedObservations = observations[:limit]
+			}
+
+			observationsJSON, err := json.Marshal(limitedObservations)
+			if err != nil {
+				return newToolCallErrorResult("Failed to format observations: %v", err)
+			}
+
+			// Provide query info
+			queryInfo := "Applied query options:\n"
+			for k, v := range queryOptions {
+				queryInfo += fmt.Sprintf("- %s: %s\n", k, v)
+			}
+
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					mcp.TextContent{
+						Text: fmt.Sprintf("Retrieved %d observations (showing %d) from dataset '%s' in catalog '%s'\n\n%s\n\n```json\n%s\n```",
+							len(observations), limit, params.Dataset, params.Catalog, queryInfo, string(observationsJSON)),
+					},
+				},
+			}
+		},
+	})
+}
+
+// createGetMetadataTools creates a tool to retrieve the OData service metadata.
+func createGetMetadataTools() mcp.Tool {
+	type GetMetadataParams struct {
+		// No parameters needed for this tool
+	}
+
+	return mcp.CreateTool(mcp.ToolDef[GetMetadataParams]{
+		Name:        "get_metadata",
+		Description: "Retrieve the OData service metadata document for the CBS API",
+		HandleFunc: func(ctx context.Context, params GetMetadataParams) *mcp.CallToolResult {
+			client := NewClient()
+			metadata, err := client.GetMetadata()
+			if err != nil {
+				return newToolCallErrorResult("Failed to retrieve metadata: %v", err)
+			}
+
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					mcp.TextContent{
+						Text: fmt.Sprintf("OData service metadata:\n\n```xml\n%s\n```", metadata),
+					},
+				},
+			}
+		},
+	})
+}
+
+// createGetDimensionValuesTools creates a tool to retrieve all values for a dimension.
+func createGetDimensionValuesTools() mcp.Tool {
+	type GetDimensionValuesParams struct {
+		// The catalog identifier
+		Catalog string `json:"catalog"`
+		// The dataset identifier
+		Dataset string `json:"dataset"`
+		// The dimension identifier
+		Dimension string `json:"dimension"`
+		// OData $select parameter to choose specific fields
+		Select string `json:"select,omitempty"`
+		// Additional OData $filter parameter for filtering results
+		Filter string `json:"filter,omitempty"`
+		// OData $orderby parameter for sorting results
+		OrderBy string `json:"orderby,omitempty"`
+		// OData $top parameter for limiting results
+		Top int `json:"top,omitempty"`
+	}
+
+	return mcp.CreateTool(mcp.ToolDef[GetDimensionValuesParams]{
+		Name:        "get_dimension_values",
+		Description: "Retrieve all values for a specific dimension with filtering and sorting options",
+		HandleFunc: func(ctx context.Context, params GetDimensionValuesParams) *mcp.CallToolResult {
+			if params.Catalog == "" {
+				return newToolCallErrorResult("Catalog identifier is required")
+			}
+			if params.Dataset == "" {
+				return newToolCallErrorResult("Dataset identifier is required")
+			}
+			if params.Dimension == "" {
+				return newToolCallErrorResult("Dimension identifier is required")
+			}
+
+			// Build query options map from parameters
+			queryOptions := make(map[string]string)
+
+			if params.Select != "" {
+				queryOptions["$select"] = params.Select
+			}
+
+			if params.Filter != "" {
+				queryOptions["$filter"] = params.Filter
+			}
+
+			if params.OrderBy != "" {
+				queryOptions["$orderby"] = params.OrderBy
+			}
+
+			if params.Top > 0 {
+				queryOptions["$top"] = strconv.Itoa(params.Top)
+			}
+
+			client := NewClient()
+			values, err := client.GetDimensionValues(params.Catalog, params.Dataset, params.Dimension, queryOptions)
+			if err != nil {
+				return newToolCallErrorResult("Failed to retrieve dimension values: %v", err)
+			}
+
+			valuesJSON, err := json.Marshal(values)
+			if err != nil {
+				return newToolCallErrorResult("Failed to format dimension values: %v", err)
+			}
+
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{
+					mcp.TextContent{
+						Text: fmt.Sprintf("Retrieved %d values for dimension '%s' in dataset '%s' (catalog '%s'):\n\n```json\n%s\n```",
+							len(values), params.Dimension, params.Dataset, params.Catalog, string(valuesJSON)),
+					},
+				},
+			}
+		},
+	})
 }
