@@ -219,6 +219,23 @@ func main() {
 	wg.Wait()
 }
 
+// simple apikey guard
+func requireAPIKey(next http.Handler) http.Handler {
+    expected := os.Getenv("API_KEY") // injected via ACA secret
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if expected == "" {
+            http.Error(w, "server misconfigured", http.StatusInternalServerError)
+            return
+        }
+        got := r.Header.Get("X-API-Key")
+        if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+            http.Error(w, "unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+
 // createGetCatalogsTools creates a tool to retrieve CBS data catalogs.
 func createGetCatalogsTools() mcp.Tool {
 	type GetCatalogsParams struct{}
