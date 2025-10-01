@@ -1,51 +1,123 @@
-name: Build and Push (GHCR)
+name: Build, Push to ACR, and Deploy to Azure Container Apps
 
 on:
   push:
     branches: [ "main" ]
-    tags: [ "v*" ]
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
+  packages: read
+  id-token: write    # required for azure/login OIDC
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
-  TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+  IMAGE_REPO: ${{ github.event.repository.name }}   # e.g., "mcp-cbs-cijfers-open-data"
+  TAG: ${{ github.sha }}
 
 jobs:
-  build:
+  build_and_deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}
+          tenant-id: ${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}
+          subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
 
-      - name: Set up Buildx
+      - name: Resolve ACR login server
+        id: acr
+        run: |
+          ACR_SERVER=$(az acr show -n "${{ secrets.AZ_ACR_NAME }}" --query loginServer -o tsv)
+          echo "server=${ACR_SERVER}" >> $GITHUB_OUTPUT
+
+      - name: ACR login (docker)
+        run: az acr login -n "${{ secrets.AZ_ACR_NAME }}"
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Optional: run tests
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - run: go test ./...
-
-      - name: Build & push
+      - name: Build & push to ACR
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-            ${{ env.IMAGE_NAME }}:latest
           platforms: linux/amd64
+          tags: |
+            ${{ steps.acr.outputs.server }}/${{ env.IMAGE_REPO }}:${{ env.TAG }}
+            ${{ steps.acr.outputs.server }}/${{ env.IMAGE_REPO }}:latest
+
+      - name: Ensure RG and ACA environment exist
+        run: |
+          az group create -n "${{ secrets.AZ_RESOURCE_GROUP }}" -l "${{ secrets.AZ_LOCATION }}"
+          az containerapp env create \
+            -g "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            -n "${{ secrets.AZ_CONTAINERAPPS_ENV }}" \
+            -l "${{ secrets.AZ_LOCATION }}" || true
+
+      # Create or update the Container App with the new image
+      - name: Create/Update Container App
+        run: |
+          IMAGE="${{ steps.acr.outputs.server }}/${{ env.IMAGE_REPO }}:latest"
+
+          # Create or update the app
+          az containerapp up \
+            --name "${{ secrets.AZ_APP_NAME }}" \
+            --resource-group "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            --environment "${{ secrets.AZ_CONTAINERAPPS_ENV }}" \
+            --image "$IMAGE" \
+            --ingress external --target-port 8080 \
+            --min-replicas 1 --max-replicas 1 \
+            --cpu 0.25 --memory 0.5Gi \
+            --args "--stdio=false" "--sse" \
+            --set-env-vars API_KEY=secretref:api-key \
+            --secrets api-key=${{ secrets.CI_API_KEY }}
+
+      # Make sure the app has a system-assigned identity and can pull from ACR
+      - name: Assign system identity to Container App
+        run: |
+          az containerapp identity assign \
+            -g "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            -n "${{ secrets.AZ_APP_NAME }}" \
+            --system-assigned
+
+      - name: Grant AcrPull to the app's identity
+        run: |
+          PRINCIPAL_ID=$(az containerapp show -g "${{ secrets.AZ_RESOURCE_GROUP }}" -n "${{ secrets.AZ_APP_NAME }}" --query identity.principalId -o tsv)
+          ACR_ID=$(az acr show -n "${{ secrets.AZ_ACR_NAME }}" --query id -o tsv)
+          # Create role assignment if it doesn't already exist
+          az role assignment create \
+            --assignee "$PRINCIPAL_ID" \
+            --role "AcrPull" \
+            --scope "$ACR_ID" \
+          || echo "AcrPull role may already be assigned."
+
+      # Tell the app which registry to use via managed identity
+      - name: Configure app to use ACR with managed identity
+        run: |
+          az containerapp registry set \
+            -g "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            -n "${{ secrets.AZ_APP_NAME }}" \
+            --server "${{ steps.acr.outputs.server }}" \
+            --identity system
+
+      # Discover public FQDN, then set PUBLIC_BASE_URL
+      - name: Get FQDN
+        id: fqdn
+        run: |
+          FQDN=$(az containerapp show -g "${{ secrets.AZ_RESOURCE_GROUP }}" -n "${{ secrets.AZ_APP_NAME }}" --query properties.configuration.ingress.fqdn -o tsv)
+          echo "fqdn=https://${FQDN}" >> $GITHUB_OUTPUT
+
+      - name: Set PUBLIC_BASE_URL env var
+        run: |
+          az containerapp update \
+            -g "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            -n "${{ secrets.AZ_APP_NAME }}" \
+            --set-env-vars PUBLIC_BASE_URL=${{ steps.fqdn.outputs.fqdn }}
+
+      - name: Output public URL
+        run: echo "App URL: ${{ steps.fqdn.outputs.fqdn }}"
