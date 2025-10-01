@@ -1,0 +1,58 @@
+name: Deploy to Azure Container Apps (Always-On)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+  id-token: write  # for azure/login OIDC
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}
+          tenant-id: ${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}
+          subscription-id: ${{ secrets.AZ_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group
+        run: az group create -n "${{ secrets.AZ_RESOURCE_GROUP }}" -l "${{ secrets.AZ_LOCATION }}"
+
+      - name: Ensure Container Apps env
+        run: |
+          az containerapp env create \
+            -g "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            -n "${{ secrets.AZ_CONTAINERAPPS_ENV }}" \
+            -l "${{ secrets.AZ_LOCATION }}" \
+          || echo "Env may already exist."
+
+      - name: Create or update Container App (always-on)
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:${{ github.event.inputs.image_tag }}"
+          az containerapp up \
+            --name "${{ secrets.AZ_APP_NAME }}" \
+            --resource-group "${{ secrets.AZ_RESOURCE_GROUP }}" \
+            --environment "${{ secrets.AZ_CONTAINERAPPS_ENV }}" \
+            --image "$IMAGE" \
+            --ingress external --target-port 8080 \
+            --min-replicas 1 --max-replicas 1 \
+            --cpu 0.25 --memory 0.5Gi \
+            --args "--stdio=false" "--sse" \
+            --revision-suffix "gh-${{ github.run_number }}"
+
+      - name: Show URL
+        run: az containerapp show -g "${{ secrets.AZ_RESOURCE_GROUP }}" -n "${{ secrets.AZ_APP_NAME }}" --query properties.configuration.ingress.fqdn -o tsv
