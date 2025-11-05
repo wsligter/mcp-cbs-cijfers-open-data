@@ -290,8 +290,6 @@ github.com/docker/go-metrics v0.0.1 h1:AgB/0SvBxihN0X8OR4SjsblXkbMvalQ8cjmtKQ2rQ
 github.com/docker/go-metrics v0.0.1/go.mod h1:cG1hvH2utMXtqgqqYE9plW6lDxS3/5ayHzueweSI3Vw=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
 github.com/docker/go-units v0.5.0/go.mod h1:fgPhTUdO+D/Jk86RDLlptpiXQzgHJF7gydDDbaIK4Dk=
-github.com/dstotijn/go-mcp v0.1.3 h1:tUzC9NwegEES2ekR8AQjAP6AhFAH/2KmvwU2n3SobHQ=
-github.com/dstotijn/go-mcp v0.1.3/go.mod h1:V8ddCZ6ZC5VswA6ZQjyiJKUSr6bhmd3Ojs74YR2AbO8=
 github.com/dstotijn/valtor v0.2.0 h1:OdBYYbODc3gkNC9KpXgAfNLx5TrOMw9Z+M1kHa1EUVc=
 github.com/dstotijn/valtor v0.2.0/go.mod h1:ucFCCz24dTX2HXVZ5mRqTsDIY/I8L4fEu/04vn1z3IY=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
@@ -773,6 +771,8 @@ github.com/whyrusleeping/cbor-gen v0.1.3-0.20240731173018-74d74643234c h1:Jmc9fH
 github.com/whyrusleeping/cbor-gen v0.1.3-0.20240731173018-74d74643234c/go.mod h1:pM99HXyEbSQHcosHc0iW7YFmwnscr+t9Te4ibko05so=
 github.com/wk8/go-ordered-map/v2 v2.1.8 h1:5h/BUHu93oj4gIdvHHHGsScSTMijfx5PeYkE/fJgbpc=
 github.com/wk8/go-ordered-map/v2 v2.1.8/go.mod h1:5nJHM5DyteebpVlHnWMV0rPz6Zp7+xBAnxjb1X5vnTw=
+github.com/wsligter/go-mcp v0.0.0-20251105102158-f16f2a25dc42 h1:IxtVieq01PCSGnSPBkTAydChB93E+yN3RSYkzi3jQ1g=
+github.com/wsligter/go-mcp v0.0.0-20251105102158-f16f2a25dc42/go.mod h1:xL+SJs4CSnlYqDTSwHiB49gW4/Bu8MeQptoh68jXSU8=
 github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=
 github.com/xanzy/ssh-agent v0.3.3/go.mod h1:6dzNDKs0J9rVPHPhaGCukekBHKqfl+L3KghI1Bc68Uw=
 github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb h1:zGWFAtiMcyryUHoUjUJX0/lt1H2+i2Ka2n+D3DImSNo=

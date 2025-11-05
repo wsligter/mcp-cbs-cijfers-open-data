@@ -2,7 +2,9 @@ module github.com/dstotijn/mcp-cbs-cijfers-open-data
 
 go 1.24.0
 
-require github.com/dstotijn/go-mcp v0.1.3
+require github.com/dstotijn/go-mcp v0.2.1-0.20250506151434-c02ecaa05f4f
+
+replace github.com/dstotijn/go-mcp => github.com/wsligter/go-mcp v0.0.0-20251105102158-f16f2a25dc42
 
 require (
 	cel.dev/expr v0.16.1 // indirect
